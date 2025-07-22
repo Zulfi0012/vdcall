@@ -1,75 +1,93 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <title>Video Room</title>
-  <link rel="stylesheet" href="/style.css">
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Room - <%= roomId %></title>
+  <link rel="stylesheet" href="/style.css" />
 </head>
 <body>
   <div class="container">
-    <h1>Room ID: <%= roomId %></h1>
-    <div class="videos">
-      <video id="localVideo" autoplay muted></video>
-      <video id="remoteVideo" autoplay></video>
+    <h1>Video Call Room: <%= roomId %></h1>
+    <div class="video-grid">
+      <video id="localVideo" autoplay muted playsinline></video>
+      <video id="remoteVideo" autoplay playsinline></video>
     </div>
+    <p class="note">Share this URL to invite someone: <code><%= `https://your-vercel-url.vercel.app/room/${roomId}` %></code></p>
   </div>
 
-  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
   <script>
     const socket = io();
     const roomId = "<%= roomId %>";
-    const localVideo = document.getElementById('localVideo');
-    const remoteVideo = document.getElementById('remoteVideo');
-    let localStream;
+    const localVideo = document.getElementById("localVideo");
+    const remoteVideo = document.getElementById("remoteVideo");
+
     let peerConnection;
+    const pendingCandidates = [];
 
     const config = {
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        {
+          urls: "turn:your.turn.server:3478",
+          username: "yourUsername",
+          credential: "yourCredential"
+        }
+      ]
     };
 
-    async function startVideo() {
-      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-      localVideo.srcObject = localStream;
+    socket.emit("join-room", roomId);
+
+    navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
+      localVideo.srcObject = stream;
 
       peerConnection = new RTCPeerConnection(config);
 
-      localStream.getTracks().forEach(track => {
-        peerConnection.addTrack(track, localStream);
-      });
+      stream.getTracks().forEach(track => peerConnection.addTrack(track, stream));
 
-      peerConnection.ontrack = (event) => {
+      peerConnection.ontrack = event => {
         remoteVideo.srcObject = event.streams[0];
       };
 
-      peerConnection.onicecandidate = (event) => {
+      peerConnection.onicecandidate = event => {
         if (event.candidate) {
-          socket.emit('signal', event.candidate);
+          socket.emit("signal", event.candidate);
         }
       };
-    }
 
-    socket.emit('join-room', roomId);
-
-    socket.on('user-connected', async () => {
-      const offer = await peerConnection.createOffer();
-      await peerConnection.setLocalDescription(offer);
-      socket.emit('signal', offer);
+      peerConnection.oniceconnectionstatechange = () => {
+        console.log("ICE Connection State:", peerConnection.iceConnectionState);
+      };
     });
 
-    socket.on('signal', async (data) => {
-      if (data.type === 'offer') {
+    socket.on("user-connected", async () => {
+      if (!peerConnection) return;
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+      socket.emit("signal", offer);
+    });
+
+    socket.on("signal", async data => {
+      if (data.type === "offer") {
         await peerConnection.setRemoteDescription(new RTCSessionDescription(data));
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
-        socket.emit('signal', answer);
-      } else if (data.type === 'answer') {
+        socket.emit("signal", answer);
+        pendingCandidates.forEach(c => peerConnection.addIceCandidate(new RTCIceCandidate(c)));
+        pendingCandidates.length = 0;
+      } else if (data.type === "answer") {
         await peerConnection.setRemoteDescription(new RTCSessionDescription(data));
+        pendingCandidates.forEach(c => peerConnection.addIceCandidate(new RTCIceCandidate(c)));
+        pendingCandidates.length = 0;
       } else if (data.candidate) {
-        await peerConnection.addIceCandidate(new RTCIceCandidate(data));
+        if (!peerConnection || !peerConnection.remoteDescription) {
+          pendingCandidates.push(data);
+        } else {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(data));
+        }
       }
     });
-
-    startVideo();
   </script>
 </body>
 </html>
